@@ -1495,6 +1495,96 @@ async fn pull_biome_quick_fixes() -> Result<()> {
 }
 
 #[tokio::test]
+async fn code_actions_should_be_available_at_diagnostic_range_start() -> Result<()> {
+    let factory = ServerFactory::default();
+    let (service, client) = factory.create().into_inner();
+    let (stream, sink) = client.split();
+    let mut server = Server::new(service);
+
+    let (sender, _) = channel(CHANNEL_BUFFER_SIZE);
+    let reader = tokio::spawn(client_handler(stream, sink, sender));
+
+    server.initialize().await?;
+    server.initialized().await?;
+
+    server.open_document("if(a === -0) {}").await?;
+
+    let res: CodeActionResponse = server
+        .request(
+            "textDocument/codeAction",
+            "pull_code_actions",
+            CodeActionParams {
+                text_document: TextDocumentIdentifier {
+                    uri: uri!("document.js"),
+                },
+                range: Range {
+                    start: fixable_diagnostic(0)?.range.start,
+                    end: fixable_diagnostic(0)?.range.start,
+                },
+                context: CodeActionContext {
+                    diagnostics: vec![fixable_diagnostic(0)?],
+                    only: Some(vec![CodeActionKind::new(
+                        "quickfix.biome.suspicious.noCompareNegZero",
+                    )]),
+                    ..Default::default()
+                },
+                work_done_progress_params: WorkDoneProgressParams {
+                    work_done_token: None,
+                },
+                partial_result_params: PartialResultParams {
+                    partial_result_token: None,
+                },
+            },
+        )
+        .await?
+        .context("codeAction returned None")?;
+
+    let mut changes = HashMap::default();
+    changes.insert(
+        uri!("document.js"),
+        vec![TextEdit {
+            range: Range {
+                start: Position {
+                    line: 0,
+                    character: 9,
+                },
+                end: Position {
+                    line: 0,
+                    character: 10,
+                },
+            },
+            new_text: String::new(),
+        }],
+    );
+
+    let expected_code_action = CodeActionOrCommand::CodeAction(CodeAction {
+        title: String::from("Replace -0 with 0"),
+        kind: Some(CodeActionKind::new(
+            "quickfix.biome.suspicious.noCompareNegZero",
+        )),
+        diagnostics: Some(vec![fixable_diagnostic(0)?]),
+        edit: Some(WorkspaceEdit {
+            changes: Some(changes),
+            document_changes: None,
+            change_annotations: None,
+        }),
+        command: None,
+        is_preferred: Some(true),
+        disabled: None,
+        data: None,
+    });
+
+    assert_eq!(res, vec![expected_code_action]);
+
+    server.close_document().await?;
+
+    server.shutdown().await?;
+    reader.abort();
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn pull_quick_fixes_include_unsafe() -> Result<()> {
     let factory = ServerFactory::default();
     let (service, client) = factory.create().into_inner();
